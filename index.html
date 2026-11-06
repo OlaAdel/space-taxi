@@ -57,7 +57,7 @@
 <div id="stage">
   <div id="game">
     <canvas id="c"></canvas>
-    <div id="hint">hold to fly · slide to steer · let go to coast</div>
+    <div id="hint">arrows or hold around the taxi</div>
   </div>
   <div id="rotate">
     <div class="phone"></div>
@@ -72,10 +72,8 @@
   canvas.tabIndex = 0;
   const view = { dpr: 1, scale: 1, ox: 0, oy: 0, vw: W, vh: H, portrait: false, fill: false, worldScale: 1, camX: 0, camY: 0 };
 
-  function isTouch() {
-    return matchMedia("(pointer: coarse)").matches
-      || matchMedia("(hover: none)").matches
-      || (navigator.maxTouchPoints || 0) > 0;
+  function touchPlay() {
+    return matchMedia("(pointer: coarse)").matches || matchMedia("(hover: none)").matches;
   }
   const gameEl = document.getElementById("game");
   const rotateEl = document.getElementById("rotate");
@@ -316,7 +314,7 @@
   ];
 
   const keys = Object.create(null);
-  const ptr = { down: false, x: W / 2, y: H / 2, originX: W / 2 };
+  const ptr = { down: false, x: W / 2, y: H / 2, sx: W / 2, sy: H / 2, t: 0 };
   const MUTE = { x: W - 64, y: 10, w: 48, h: 48 };
   const PAUSE_BTN = { x: W - 64, y: 62, w: 48, h: 48 };
   const pausePress = { on: false, t: 0, x: 0, y: 0 };
@@ -734,7 +732,7 @@
     muted = true;
     thrustSound(false);
     ptr.down = false;
-    keys.ArrowUp = keys.KeyW = keys.Space = keys.ArrowLeft = keys.ArrowRight = keys.KeyA = keys.KeyD = false;
+    keys.ArrowUp = keys.KeyW = keys.Space = keys.ArrowDown = keys.KeyS = keys.ArrowLeft = keys.ArrowRight = keys.KeyA = keys.KeyD = false;
     try { if (actx && actx.state === "running") actx.suspend(); } catch (_) {}
     try { canvas.blur(); } catch (_) {}
     try { if (document.exitPointerLock) document.exitPointerLock(); } catch (_) {}
@@ -842,7 +840,7 @@
     setTimeout(() => { if (id === runId) respawn(); }, 620);
   }
   function setPause(on) {
-    keys.ArrowUp = keys.KeyW = keys.Space = keys.ArrowLeft = keys.ArrowRight = keys.KeyA = keys.KeyD = false;
+    keys.ArrowUp = keys.KeyW = keys.Space = keys.ArrowDown = keys.KeyS = keys.ArrowLeft = keys.ArrowRight = keys.KeyA = keys.KeyD = false;
     if (on) {
       if (mode !== "play" || adsOn) return;
       mode = "pause"; poki.stop(); thrustSound(false); ptr.down = false;
@@ -890,17 +888,38 @@
   function uiXY(ev) {
     return screenXY(ev);
   }
-  function fly() { return !inputOff && (keys.ArrowUp || keys.KeyW || keys.Space || ptr.down); }
-  function left() {
-    if (inputOff) return false;
-    if (keys.ArrowLeft || keys.KeyA) return true;
-    return ptr.down && ptr.x < ptr.originX - 22;
+  function aim() {
+    if (!ptr.down || !taxi) return { ax: 0, ay: 0 };
+    const s = view.worldScale || 1;
+    const dx = ptr.sx - (taxi.x - view.camX) * s;
+    const dy = ptr.sy - (taxi.y + TH / 2 - view.camY) * s;
+    const dead = 18;
+    const reach = 56;
+    return {
+      ax: Math.abs(dx) < dead ? 0 : clamp(dx / reach, -1.7, 1.7),
+      ay: Math.abs(dy) < dead ? 0 : clamp(dy / reach, -1.7, 1.7),
+    };
   }
-  function right() {
+  function fly() {
     if (inputOff) return false;
-    if (keys.ArrowRight || keys.KeyD) return true;
-    return ptr.down && ptr.x > ptr.originX + 22;
+    if (keys.ArrowUp || keys.KeyW || keys.Space) return true;
+    return aim().ay < -0.2;
   }
+  function down() {
+    if (inputOff) return false;
+    if (keys.ArrowDown || keys.KeyS) return true;
+    return aim().ay > 0.2;
+  }
+  function steerX() {
+    if (inputOff) return 0;
+    let ax = 0;
+    if (keys.ArrowLeft || keys.KeyA) ax -= 1;
+    if (keys.ArrowRight || keys.KeyD) ax += 1;
+    if (ax) return clamp(ax, -1, 1);
+    return aim().ax;
+  }
+  function left() { return steerX() < -0.05; }
+  function right() { return steerX() > 0.05; }
   function hasGas() { return fuel > 0.05; }
   function speedNow() { return taxi ? Math.hypot(taxi.vx, taxi.vy) : 0; }
   function burn(dt, thrusting) {
@@ -933,10 +952,11 @@
     for (const p of pops) { p.life -= dt; p.y -= 32 * dt; }
     pops.splice(0, pops.length, ...pops.filter((p) => p.life > 0));
     if (!taxi) return;
+    refreshCam();
     taxi.tilt = lerp(taxi.tilt, clamp(taxi.vx / 150, -0.28, 0.28), 1 - Math.pow(0.001, dt));
     if (mode === "dead" || (mode === "over" && overWhy !== "dry tank")) { taxi.rot += 10 * dt; return; }
     if (mode === "over") return;
-    if (view.portrait) { thrustSound(false); return; }
+    if (view.portrait) { thrustSound(false); ptr.down = false; return; }
     if (adsOn || mode !== "play") return;
 
     if (hasGas()) dryCoast = false;
@@ -967,7 +987,8 @@
       taxi.vx += (cx - taxi.x) * mag * 8 * dt;
     }
 
-    const thrusting = hasGas() && (fly() || left() || right());
+    const ax = steerX();
+    const thrusting = hasGas() && (fly() || down() || Math.abs(ax) > 0.05);
     if (fly() && hasGas()) {
       taxi.vy -= THRUST * dt;
       parts.push({
@@ -977,8 +998,17 @@
         color: Math.random() > 0.45 ? "#7ecbff" : "#fff4c8",
       });
     }
-    if (left()) {
-      taxi.vx -= SIDE * dt; taxi.face = -1;
+    if (down() && hasGas()) {
+      taxi.vy += THRUST * dt;
+      parts.push({
+        x: taxi.x + (Math.random() - 0.5) * 12, y: taxi.y - 4,
+        vx: (Math.random() - 0.5) * 16, vy: -55 - Math.random() * 40,
+        life: 0.22, max: 0.22, r: 3 + Math.random() * 3,
+        color: Math.random() > 0.45 ? "#7ecbff" : "#fff4c8",
+      });
+    }
+    if (ax < -0.05) {
+      taxi.vx -= SIDE * dt * Math.abs(ax); taxi.face = -1;
       if (hasGas()) {
         parts.push({
           x: taxi.x + 22, y: taxi.y + TH * 0.55,
@@ -988,8 +1018,8 @@
         });
       }
     }
-    if (right()) {
-      taxi.vx += SIDE * dt; taxi.face = 1;
+    if (ax > 0.05) {
+      taxi.vx += SIDE * dt * ax; taxi.face = 1;
       if (hasGas()) {
         parts.push({
           x: taxi.x - 22, y: taxi.y + TH * 0.55,
@@ -1166,7 +1196,7 @@
   }
 
   function draw() {
-    thrustSound(mode === "play" && taxi && !taxi.landed && fly() && hasGas());
+    thrustSound(mode === "play" && taxi && !taxi.landed && hasGas() && (fly() || down() || left() || right()));
     refreshCam();
     const L = LEVELS[Math.min(level || 0, LEVELS.length - 1)];
     const sx = shake ? (Math.random() - 0.5) * shake : 0;
@@ -1390,10 +1420,10 @@
       ctx.fillStyle = "#fff6d6"; ctx.font = "700 44px Outfit, sans-serif";
       ctx.fillText("Space Taxi", cx, vh * 0.22);
       ctx.fillStyle = "rgba(230,236,255,.85)"; ctx.font = "600 16px Outfit, sans-serif";
-      ctx.fillText("Hold to fly. Land soft on the glowing pad.", cx, vh * 0.28);
+      ctx.fillText("Land soft on the glowing pad.", cx, vh * 0.28);
       ctx.fillStyle = "rgba(230,236,255,.55)"; ctx.font = "600 14px Outfit, sans-serif";
       ctx.fillText("3 taxis. Too fast costs one.", cx, vh * 0.33);
-      ctx.fillText("Hold  ·  slide to steer  ·  let go to coast", cx, vh * 0.38);
+      ctx.fillText(touchPlay() ? "Hold around the taxi  ·  above, below, left, right" : "Arrow keys or hold around the taxi", cx, vh * 0.38);
       ctx.fillStyle = "rgba(230,236,255,.5)";
       ctx.fillText("best  $" + (best || 0) + "  ·  saved", cx, vh * 0.45);
       ctx.fillStyle = "#ffe08a"; ctx.font = "700 18px Outfit, sans-serif";
@@ -1447,7 +1477,7 @@
   function onPtr(ev, down) {
     const p = canvasXY(ev);
     const u = uiXY(ev);
-    ptr.x = p.x; ptr.y = p.y;
+    ptr.x = p.x; ptr.y = p.y; ptr.sx = u.x; ptr.sy = u.y;
     if (adsOn || inputOff) {
       if (down === false) ptr.down = false;
       return;
@@ -1456,7 +1486,6 @@
       if (mode !== "boot" && inBox(u, muteBox())) { toggleMute(); return; }
       if (mode === "play" && inBox(u, pauseBox())) {
         pausePress.on = true; pausePress.t = performance.now(); pausePress.x = u.x; pausePress.y = u.y;
-        if (taxi && !taxi.landed) { ptr.down = true; ptr.originX = p.x; }
         return;
       }
       if (mode === "pause") {
@@ -1470,7 +1499,8 @@
         else if (inBox(u, menuWatch())) watchContinue();
         return;
       }
-      ptr.down = true; ptr.originX = p.x;
+      ptr.down = true;
+      ptr.t = performance.now();
       if (mode === "title") firstPlay();
     }
     if (down === false) {
@@ -1479,6 +1509,20 @@
         const dist = Math.hypot(u.x - pausePress.x, u.y - pausePress.y);
         if (mode === "play" && held < 320 && dist < 18 && inBox(u, pauseBox())) setPause(true);
         pausePress.on = false;
+        ptr.down = false;
+        return;
+      }
+      if (mode === "play" && !adsOn && taxi && hasGas() && performance.now() - ptr.t < 220) {
+        const a = aim();
+        if (Math.abs(a.ax) > 0.2 || Math.abs(a.ay) > 0.2) {
+          if (taxi.landed) {
+            if (a.ay < -0.2) { taxi.landed = false; taxi.vy = -TAKEOFF; burn(0.12, true); }
+          } else {
+            taxi.vx += a.ax * 38;
+            taxi.vy += a.ay * 38;
+            burn(0.08, true);
+          }
+        }
       }
       ptr.down = false;
     }
