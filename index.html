@@ -1,0 +1,1531 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+<title>Space Taxi</title>
+<script src="https://game-cdn.poki.com/scripts/v2/poki-sdk.js"></script>
+<style>
+  @font-face { font-family: Outfit; src: url("fonts/outfit-400.woff2") format("woff2"); font-weight: 400; font-display: swap; }
+  @font-face { font-family: Outfit; src: url("fonts/outfit-600.woff2") format("woff2"); font-weight: 600; font-display: swap; }
+  @font-face { font-family: Outfit; src: url("fonts/outfit-700.woff2") format("woff2"); font-weight: 700; font-display: swap; }
+  * { box-sizing: border-box; user-select: none; -webkit-user-select: none; }
+  html, body {
+    margin: 0; width: 100%; height: 100%; background: #08090f; overflow: hidden;
+    touch-action: none; font-family: Outfit, system-ui, sans-serif;
+  }
+  #stage {
+    position: fixed; inset: 0; width: 100%; height: 100%;
+    display: flex; align-items: center; justify-content: center;
+    background: #08090f;
+  }
+  #game {
+    position: relative;
+    width: 100%;
+    height: 100%;
+  }
+  canvas { display: block; width: 100%; height: 100%; background: #08090f; outline: none; }
+  #hint {
+    position: absolute; left: 0; right: 0; bottom: 14px;
+    text-align: center; color: rgba(244,247,255,.55);
+    font: 600 13px Outfit, system-ui, sans-serif;
+    pointer-events: none; display: none;
+  }
+  #rotate {
+    display: none; position: fixed; inset: 0; z-index: 20;
+    background: #08090f; color: #fff6d6;
+    align-items: center; justify-content: center; text-align: center;
+    flex-direction: column; gap: 22px;
+    font: 600 22px Outfit, system-ui, sans-serif; padding: 24px;
+  }
+  #rotate .phone {
+    width: 86px; height: 52px; border: 3px solid #ffe08a; border-radius: 10px;
+    position: relative; animation: tilt 1.4s ease-in-out infinite;
+  }
+  #rotate .phone:after {
+    content: ""; position: absolute; right: -8px; top: 18px;
+    width: 4px; height: 14px; border-radius: 2px; background: #ffe08a;
+  }
+  @keyframes tilt {
+    0%, 100% { transform: rotate(0deg); }
+    40% { transform: rotate(90deg); }
+    60% { transform: rotate(90deg); }
+  }
+</style>
+</head>
+<body>
+<div id="stage">
+  <div id="game">
+    <canvas id="c"></canvas>
+    <div id="hint">hold to fly · slide to steer · let go to coast</div>
+  </div>
+  <div id="rotate">
+    <div class="phone"></div>
+    Turn your device sideways
+  </div>
+</div>
+<script>
+(() => {
+  const W = 1280, H = 720;
+  const canvas = document.getElementById("c");
+  const ctx = canvas.getContext("2d");
+  canvas.tabIndex = 0;
+  const view = { dpr: 1, scale: 1, ox: 0, oy: 0, vw: W, vh: H, portrait: false, fill: false, worldScale: 1, camX: 0, camY: 0 };
+
+  function isTouch() {
+    return matchMedia("(pointer: coarse)").matches
+      || matchMedia("(hover: none)").matches
+      || (navigator.maxTouchPoints || 0) > 0;
+  }
+  const gameEl = document.getElementById("game");
+  const rotateEl = document.getElementById("rotate");
+  const hintEl = document.getElementById("hint");
+  hintEl.style.display = "none";
+  function viewSize() {
+    const vv = window.visualViewport;
+    if (vv && vv.width && vv.height) return { vw: vv.width, vh: vv.height };
+    return { vw: window.innerWidth, vh: window.innerHeight };
+  }
+  function isPortrait() {
+    const { vw, vh } = viewSize();
+    return vh > vw * 1.08;
+  }
+  function fitStage() {
+    const { vw, vh } = viewSize();
+    const dpr = Math.min(2, window.devicePixelRatio || 1);
+    canvas.width = Math.max(1, Math.round(vw * dpr));
+    canvas.height = Math.max(1, Math.round(vh * dpr));
+    canvas.style.width = vw + "px";
+    canvas.style.height = vh + "px";
+    const scale = Math.min(vw / W, vh / H);
+    view.dpr = dpr;
+    view.scale = scale;
+    view.ox = (vw - W * scale) / 2;
+    view.oy = (vh - H * scale) / 2;
+    view.vw = vw;
+    view.vh = vh;
+    view.portrait = vh > vw * 1.08;
+    view.cover = !view.portrait;
+    rotateEl.style.display = view.portrait ? "flex" : "none";
+  }
+  function jobPad() {
+    const n = wantPad();
+    if (!n) return null;
+    const L = typeof lvl === "function" ? lvl() : null;
+    return (L && L.pads.find((p) => p.n === n)) || null;
+  }
+  function refreshCam() {
+    const scale = view.cover ? Math.max(view.vw / W, view.vh / H) : view.scale;
+    const visW = view.vw / scale, visH = view.vh / scale;
+    let cx = W / 2, cy = H / 2;
+    if (visW < W && taxi && mode !== "title" && mode !== "boot") {
+      const p = jobPad();
+      cx = p ? taxi.x + clamp((p.x + p.w / 2 - taxi.x) * 0.34, -visW * 0.28, visW * 0.28) : taxi.x;
+    }
+    if (visH < H) {
+      let top = 40, bot = H;
+      try {
+        const ps = lvl() && lvl().pads;
+        if (ps && ps.length) {
+          top = Math.min(...ps.map((p) => p.y)) - 90;
+          bot = Math.max(...ps.map((p) => p.y)) + 24;
+        }
+      } catch (_) {}
+      cy = (top + bot) / 2;
+    }
+    let camX = cx - visW / 2, camY = cy - visH / 2;
+    camX = visW >= W ? (W - visW) / 2 : clamp(camX, 0, W - visW);
+    camY = visH >= H ? (H - visH) / 2 : clamp(camY, 0, H - visH);
+    view.worldScale = scale;
+    view.camX = camX;
+    view.camY = camY;
+  }
+  function applyWorld() {
+    const s = view.worldScale;
+    ctx.setTransform(view.dpr * s, 0, 0, view.dpr * s, view.dpr * (-view.camX * s), view.dpr * (-view.camY * s));
+  }
+  function applyUi() {
+    ctx.setTransform(view.dpr, 0, 0, view.dpr, 0, 0);
+  }
+  function screenXY(ev) {
+    const r = canvas.getBoundingClientRect();
+    return { x: ev.clientX - r.left, y: ev.clientY - r.top };
+  }
+  function muteBox() {
+    return { x: view.vw - 56, y: 12, w: 48, h: 48 };
+  }
+  function pauseBox() {
+    return { x: view.vw - 56, y: 64, w: 48, h: 48 };
+  }
+  function fuelBox() {
+    const w = view.vw < 720 ? 124 : 160;
+    return { x: view.vw - 56 - 10 - w, y: 12, w, h: 52 };
+  }
+  function menuSlot(n, h) {
+    const w = Math.min(380, view.vw - 40);
+    return { x: (view.vw - w) / 2, y: view.vh * 0.5 + n * 68, w, h };
+  }
+  function menuRetry() { return menuSlot(0, 56); }
+  function menuWatch() { return menuSlot(1, 56); }
+  function menuResume() { return menuSlot(0, 56); }
+  function menuQuit() { return menuSlot(1, 48); }
+  fitStage();
+  window.addEventListener("resize", fitStage);
+  window.addEventListener("orientationchange", fitStage);
+  if (window.visualViewport) window.visualViewport.addEventListener("resize", fitStage);
+
+  function sdk() { return window.PokiSDK; }
+  function sdkCall(name, ...args) {
+    const s = sdk();
+    if (!s || typeof s[name] !== "function") return undefined;
+    return s[name](...args);
+  }
+  let playing = false, adsOn = false, loadedSent = false, began = false;
+  const poki = {
+    init: () => {
+      const s = sdk();
+      if (s && typeof s.init === "function") return Promise.resolve(s.init());
+      return Promise.resolve();
+    },
+    loaded: () => {
+      if (loadedSent) return;
+      loadedSent = true;
+      try { sdkCall("gameLoadingFinished"); } catch (_) {}
+    },
+    start: () => {
+      if (adsOn || playing) return;
+      playing = true;
+      try { sdkCall("gameplayStart"); } catch (_) {}
+    },
+    stop: () => {
+      if (adsOn || !playing) return;
+      playing = false;
+      try { sdkCall("gameplayStop"); } catch (_) {}
+    },
+    ad: (fn) => {
+      const s = sdk();
+      if (!s || typeof s.commercialBreak !== "function") return Promise.resolve();
+      return Promise.resolve(s.commercialBreak(fn));
+    },
+    reward: (fn) => {
+      const s = sdk();
+      if (!s || typeof s.rewardedBreak !== "function") return Promise.resolve(true);
+      return Promise.resolve(s.rewardedBreak(fn));
+    },
+    happy: (n) => {
+      if (adsOn) return;
+      try { sdkCall("happyTime", n); } catch (_) {}
+    },
+    pill: () => { try { sdkCall("movePill", 0, 68); } catch (_) {} },
+  };
+
+  const GRAV = 58, THRUST = 122, SIDE = 90, DRAG_X = 1.15, DRAG_Y = 0.2;
+  const MAX_V = 148, TAKEOFF = 40, TW = 52, TH = 22, MAX_LIVES = 3;
+  const PAD_GO = "#6af0ff", PAD_DANGER = "#ff8a7a", PAD_IDLE = "rgba(198,216,236,.9)";
+  const OOPS = ["bonk", "yeet", "not the paint", "whoops", "easy tiger", "the wall said no", "try a kiss, not a slap"];
+  const ALIEN = ["#7ee0b0", "#ffb4e6", "#9ad0ff", "#ffe08a", "#c5b4ff"];
+
+  const LEVELS = [
+    {
+      name: "Dock 1", hook: "Wide pads. Easy air.", fares: 3, burn: 0.8, land: 84, magnet: 0.05,
+      sky: ["#141a2c", "#08090f"], wall: ["#2a3348", "#151922"],
+      walls: [
+        [0, 0, 1280, 40], [0, 680, 1280, 40], [0, 40, 32, 640], [1248, 40, 32, 640],
+        [270, 560, 220, 20], [700, 360, 190, 20],
+      ],
+      pads: [
+        { n: 1, x: 70, y: 680, w: 190 },
+        { n: 2, x: 280, y: 560, w: 200 },
+        { n: 3, x: 715, y: 360, w: 160 },
+        { n: 4, x: 1020, y: 680, w: 190 },
+      ],
+    },
+    {
+      name: "Needles", hook: "Thread the gaps.", fares: 3, burn: 1, land: 72, magnet: 0.02,
+      sky: ["#0c2438", "#060910"], wall: ["#1c4a62", "#0c1820"],
+      walls: [
+        [0, 0, 1280, 40], [0, 680, 1280, 40], [0, 40, 32, 640], [1248, 40, 32, 640],
+        [240, 40, 22, 470], [490, 210, 22, 470], [740, 40, 22, 440], [990, 210, 22, 470],
+      ],
+      pads: [
+        { n: 1, x: 50, y: 680, w: 140 }, { n: 2, x: 300, y: 680, w: 140 },
+        { n: 3, x: 780, y: 210, w: 140 }, { n: 4, x: 1080, y: 680, w: 140 },
+      ],
+    },
+    {
+      name: "High dock", hook: "Climb the shelves.", fares: 3, burn: 1.1, land: 70, magnet: 0.018,
+      sky: ["#22143a", "#0a0814"], wall: ["#4a3568", "#1a1228"],
+      walls: [
+        [0, 0, 1280, 40], [0, 680, 1280, 40], [0, 40, 32, 640], [1248, 40, 32, 640],
+        [170, 560, 200, 16], [390, 430, 180, 16], [610, 300, 170, 16], [850, 180, 170, 16],
+      ],
+      pads: [
+        { n: 1, x: 50, y: 680, w: 150 },
+        { n: 2, x: 180, y: 560, w: 150 },
+        { n: 3, x: 400, y: 430, w: 140 },
+        { n: 4, x: 620, y: 300, w: 130 },
+        { n: 5, x: 860, y: 180, w: 130 },
+      ],
+    },
+    {
+      name: "Crosswind", hook: "The wind is the wall.", fares: 3, burn: 1.18, land: 64, magnet: 0, wind: 36,
+      sky: ["#0e3038", "#071014"], wall: ["#2a5860", "#102024"],
+      walls: [
+        [0, 0, 1280, 40], [0, 680, 1280, 40], [0, 40, 32, 640], [1248, 40, 32, 640],
+        [190, 200, 170, 16], [890, 360, 170, 16],
+        [540, 40, 20, 170], [800, 510, 20, 170],
+      ],
+      pads: [
+        { n: 1, x: 50, y: 680, w: 150 },
+        { n: 2, x: 200, y: 200, w: 140 },
+        { n: 3, x: 900, y: 360, w: 140 },
+        { n: 4, x: 1060, y: 680, w: 160 },
+      ],
+    },
+    {
+      name: "The well", hook: "Stay in the shaft.", fares: 4, burn: 1.28, land: 60, magnet: 0,
+      sky: ["#0c1c18", "#060a0c"], wall: ["#1a3a32", "#0c1614"],
+      walls: [
+        [0, 0, 1280, 40], [0, 680, 1280, 40], [0, 40, 320, 640], [960, 40, 320, 640],
+        [320, 220, 170, 16], [790, 360, 170, 16], [320, 500, 170, 16],
+      ],
+      pads: [
+        { n: 1, x: 540, y: 680, w: 200 },
+        { n: 2, x: 330, y: 220, w: 140 },
+        { n: 3, x: 810, y: 360, w: 140 },
+        { n: 4, x: 330, y: 500, w: 140 },
+      ],
+    },
+    {
+      name: "Night shift", hook: "Tuck under the roofs.", fares: 4, burn: 1.36, land: 58, magnet: 0,
+      sky: ["#140e24", "#07060c"], wall: ["#3a2a52", "#14101c"],
+      walls: [
+        [0, 0, 1280, 40], [0, 680, 1280, 40], [0, 40, 32, 640], [1248, 40, 32, 640],
+        [32, 250, 280, 16], [32, 380, 280, 16], [292, 250, 20, 52],
+        [500, 120, 240, 16], [500, 220, 240, 16], [720, 120, 20, 48],
+        [980, 380, 268, 16], [980, 500, 268, 16], [980, 380, 20, 48],
+      ],
+      pads: [
+        { n: 1, x: 50, y: 680, w: 120 },
+        { n: 2, x: 70, y: 380, w: 120 },
+        { n: 3, x: 530, y: 220, w: 120 },
+        { n: 4, x: 1020, y: 500, w: 120 },
+        { n: 5, x: 1080, y: 680, w: 120 },
+      ],
+    },
+  ];
+
+  const keys = Object.create(null);
+  const ptr = { down: false, x: W / 2, y: H / 2, originX: W / 2 };
+  const MUTE = { x: W - 64, y: 10, w: 48, h: 48 };
+  const PAUSE_BTN = { x: W - 64, y: 62, w: 48, h: 48 };
+  const pausePress = { on: false, t: 0, x: 0, y: 0 };
+  const RETRY = { x: W / 2 - 190, y: 418, w: 380, h: 56 };
+  const WATCH = { x: W / 2 - 190, y: 488, w: 380, h: 56 };
+  const RESUME = { x: W / 2 - 190, y: 300, w: 380, h: 56 };
+  const QUIT = { x: W / 2 - 190, y: 368, w: 380, h: 48 };
+  const parts = [];
+  const pops = [];
+  const stars = Array.from({ length: 110 }, () => ({
+    x: Math.random() * W, y: 40 + Math.random() * 640, s: 0.4 + Math.random() * 1.4, tw: Math.random() * 6,
+  }));
+
+  let mode = "boot", muted = false, userMuted = false, inputOff = false;
+  let taxi, fare, score, combo, best, shake, t, flash, runId, deaths;
+  let level, faresDone, fuel, banner, bannerT, fareAt, newBest, actx, spin, lives, overWhy, fuelGlow, thrustFx;
+  let landTip, hintT, clearT, dockSplash, dockHook, dockSplashT, dryCoast;
+
+  function lvl() { return LEVELS[level]; }
+  function pads() { return lvl().pads; }
+  function walls() { return lvl().walls; }
+  function homePad() { return pads()[0]; }
+  function landMax() { return lvl().land || 80; }
+  function loadBest() { try { return Number(localStorage.getItem("st_poki_best") || 0); } catch (_) { return 0; } }
+  function saveBest(n) { try { localStorage.setItem("st_poki_best", String(n)); } catch (_) {} }
+  function loadMute() { try { return localStorage.getItem("st_poki_quiet") === "1"; } catch (_) { return false; } }
+  function saveMute(on) { try { localStorage.setItem("st_poki_quiet", on ? "1" : "0"); } catch (_) {} }
+  function inBox(p, b) { return p.x >= b.x && p.x <= b.x + b.w && p.y >= b.y && p.y <= b.y + b.h; }
+  function toggleMute() { userMuted = !userMuted; saveMute(userMuted); if (userMuted) thrustSound(false); }
+  function audioCtx() {
+    if (muted || userMuted) return null;
+    try {
+      actx = actx || new AudioContext();
+      if (actx.state === "suspended") actx.resume();
+      return actx;
+    } catch (_) { return null; }
+  }
+  function tone(freq, dur, type, vol) {
+    const ctx = audioCtx();
+    if (!ctx) return;
+    try {
+      const o = ctx.createOscillator(), g = ctx.createGain();
+      o.type = type || "sine"; o.frequency.value = freq;
+      g.gain.setValueAtTime(vol || 0.04, ctx.currentTime);
+      g.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + dur);
+      o.connect(g); g.connect(ctx.destination); o.start(); o.stop(ctx.currentTime + dur);
+    } catch (_) {}
+  }
+  function chord(notes, dur, type) {
+    notes.forEach((f, i) => setTimeout(() => tone(f, dur, type || "sine", 0.035), i * 70));
+  }
+  function thud() {
+    const ctx = audioCtx();
+    if (!ctx) return;
+    try {
+      const o = ctx.createOscillator(), g = ctx.createGain();
+      o.type = "sine"; o.frequency.setValueAtTime(140, ctx.currentTime);
+      o.frequency.exponentialRampToValueAtTime(42, ctx.currentTime + 0.16);
+      g.gain.setValueAtTime(0.09, ctx.currentTime);
+      g.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.16);
+      o.connect(g); g.connect(ctx.destination); o.start(); o.stop(ctx.currentTime + 0.16);
+    } catch (_) {}
+  }
+  function noiseHit(vol) {
+    const ctx = audioCtx();
+    if (!ctx) return;
+    try {
+      const n = Math.floor(ctx.sampleRate * 0.22), buf = ctx.createBuffer(1, n, ctx.sampleRate), d = buf.getChannelData(0);
+      for (let i = 0; i < n; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / n);
+      const src = ctx.createBufferSource(); src.buffer = buf;
+      const f = ctx.createBiquadFilter(); f.type = "lowpass"; f.frequency.value = 520;
+      const g = ctx.createGain(); g.gain.setValueAtTime(vol || 0.14, ctx.currentTime);
+      g.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.22);
+      src.connect(f); f.connect(g); g.connect(ctx.destination); src.start();
+    } catch (_) {}
+  }
+  function ensureThrustFx() {
+    const ctx = audioCtx();
+    if (!ctx) return null;
+    if (thrustFx && thrustFx.ctx === ctx) return thrustFx;
+    const n = ctx.sampleRate, buf = ctx.createBuffer(1, n, n), data = buf.getChannelData(0);
+    for (let i = 0; i < n; i++) data[i] = (Math.random() * 2 - 1) * (1 - i / n * 0.15);
+    const src = ctx.createBufferSource(); src.buffer = buf; src.loop = true;
+    const hp = ctx.createBiquadFilter(); hp.type = "highpass"; hp.frequency.value = 140;
+    const bp = ctx.createBiquadFilter(); bp.type = "bandpass"; bp.frequency.value = 360; bp.Q.value = 0.65;
+    const whoosh = ctx.createGain(); whoosh.gain.value = 0.0001;
+    src.connect(hp); hp.connect(bp); bp.connect(whoosh); whoosh.connect(ctx.destination);
+    const osc = ctx.createOscillator(); osc.type = "sine"; osc.frequency.value = 62;
+    const hum = ctx.createGain(); hum.gain.value = 0.0001;
+    osc.connect(hum); hum.connect(ctx.destination);
+    const spark = ctx.createOscillator(); spark.type = "triangle"; spark.frequency.value = 880;
+    const air = ctx.createGain(); air.gain.value = 0.0001;
+    spark.connect(air); air.connect(ctx.destination);
+    src.start(); osc.start(); spark.start();
+    thrustFx = { ctx, bp, whoosh, osc, hum, spark, air };
+    return thrustFx;
+  }
+  function thrustSound(on) {
+    if (!on || muted || userMuted) {
+      if (!thrustFx) return;
+      const now = thrustFx.ctx.currentTime;
+      thrustFx.whoosh.gain.setTargetAtTime(0.0001, now, 0.09);
+      thrustFx.hum.gain.setTargetAtTime(0.0001, now, 0.1);
+      thrustFx.air.gain.setTargetAtTime(0.0001, now, 0.08);
+      return;
+    }
+    const fx = ensureThrustFx();
+    if (!fx) return;
+    const now = fx.ctx.currentTime, spd = speedNow();
+    fx.whoosh.gain.setTargetAtTime(0.05, now, 0.05);
+    fx.hum.gain.setTargetAtTime(0.02, now, 0.07);
+    fx.air.gain.setTargetAtTime(0.007, now, 0.06);
+    fx.bp.frequency.setTargetAtTime(280 + spd * 1.6, now, 0.12);
+    fx.osc.frequency.setTargetAtTime(54 + spd * 0.28, now, 0.12);
+    fx.spark.frequency.setTargetAtTime(720 + spd * 1.1, now, 0.14);
+  }
+  function pop(x, y, text, color, life) { pops.push({ x, y, text, color: color || "#fff", life: life || 1 }); }
+  function say(text, secs) { banner = text; bannerT = secs || 2; }
+  function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
+  function lerp(a, b, k) { return a + (b - a) * k; }
+  function blockedAt(L, x, y) {
+    const box = { x: x - TW / 2 - 8, y: y - 12, w: TW + 16, h: TH + 18 };
+    for (const w of L.walls) {
+      if (box.x < w[0] + w[2] && box.x + box.w > w[0] && box.y < w[1] + w[3] && box.y + box.h > w[1]) return true;
+    }
+    return x < 48 || x > W - 48 || y < 56 || y > H - 48;
+  }
+  function mazeFactor(L) {
+    let b = 0, n = 0;
+    for (let x = 80; x < W - 80; x += 40) {
+      for (let y = 80; y < H - 80; y += 40) {
+        n += 1;
+        if (blockedAt(L, x, y)) b += 1;
+      }
+    }
+    return b / Math.max(1, n);
+  }
+  function pathLen(L, ax, ay, bx, by) {
+    const CS = 28, cols = Math.ceil(W / CS), rows = Math.ceil(H / CS);
+    function snap(x, y) {
+      const bi = Math.round(x / CS), bj = Math.round(y / CS);
+      let best = null, bestD = 1e9;
+      for (let r = 0; r <= 10; r++) {
+        for (let dj = -r; dj <= r; dj++) {
+          for (let di = -r; di <= r; di++) {
+            if (Math.max(Math.abs(di), Math.abs(dj)) !== r) continue;
+            const i = bi + di, j = bj + dj, px = i * CS, py = j * CS;
+            if (i < 0 || j < 0 || i > cols || j > rows || blockedAt(L, px, py)) continue;
+            const d = Math.hypot(px - x, py - y);
+            if (d < bestD) { bestD = d; best = { i, j, x: px, y: py }; }
+          }
+        }
+        if (best) return best;
+      }
+      return { i: bi, j: bj, x, y };
+    }
+    const s = snap(ax, ay), g = snap(bx, by);
+    const key = (i, j) => i + j * 2048;
+    const dist = new Map([[key(s.i, s.j), 0]]);
+    const heap = [[0, s.i, s.j]];
+    const dirs = [];
+    for (const di of [-1, 0, 1]) for (const dj of [-1, 0, 1]) {
+      if (di || dj) dirs.push([di, dj, Math.hypot(di, dj) * CS]);
+    }
+    let guard = 0;
+    while (heap.length && guard++ < 12000) {
+      let minAt = 0;
+      for (let k = 1; k < heap.length; k++) if (heap[k][0] < heap[minAt][0]) minAt = k;
+      const [d, i, j] = heap.splice(minAt, 1)[0];
+      if (d !== dist.get(key(i, j))) continue;
+      if (i === g.i && j === g.j) return d + Math.hypot(s.x - ax, s.y - ay) + Math.hypot(g.x - bx, g.y - by);
+      for (const [di, dj, c] of dirs) {
+        const ni = i + di, nj = j + dj, nx = ni * CS, ny = nj * CS;
+        if (ni < 0 || nj < 0 || ni > cols || nj > rows || blockedAt(L, nx, ny)) continue;
+        const nd = d + c * (dj < 0 ? 1.38 : 1);
+        const k = key(ni, nj);
+        if (nd < (dist.get(k) ?? 1e9)) { dist.set(k, nd); heap.push([nd, ni, nj]); }
+      }
+    }
+    return Math.hypot(bx - ax, by - ay) * 2.6;
+  }
+  function budgetFuel(L, index) {
+    const pts = L.pads.map((p) => ({ x: p.x + p.w / 2, y: p.y - 40 }));
+    let sum = 0, maxD = 0, n = 0;
+    for (let i = 0; i < pts.length; i++) {
+      for (let j = 0; j < pts.length; j++) {
+        if (i === j) continue;
+        const d = pathLen(L, pts[i].x, pts[i].y, pts[j].x, pts[j].y);
+        sum += d; n += 1; maxD = Math.max(maxD, d);
+      }
+    }
+    const hop = (sum / Math.max(1, n)) * 0.6 + maxD * 0.4;
+    const hops = L.fares * 2;
+    const maze = mazeFactor(L);
+    const burn = L.burn || 1;
+    const thrustFrac = 0.54 + 0.32 * maze + (L.wind ? 0.05 : 0);
+    const pathFuel = (hop * hops / 88) * (0.7 + 2.4 * 0.4) * burn * thrustFrac;
+    const takeoffFuel = hops * 0.34 * burn;
+    const windFuel = (L.wind || 0) * hops * 0.04 * burn;
+    const play = [3.25, 1.18, 2.2, 1.55, 1.5, 1.25][index] || 1.1;
+    return clamp(Math.round((pathFuel + takeoffFuel + windFuel) * play), 68, 240);
+  }
+  LEVELS.forEach((L, i) => { L.tank = budgetFuel(L, i); L.maze = mazeFactor(L); });
+  function padPoint(p) { return { x: p.x + p.w / 2, y: p.y - 40 }; }
+  function hopHurry(from, dest) {
+    const L = lvl();
+    const a = padPoint(from), b = padPoint(dest);
+    const bird = Math.hypot(b.x - a.x, b.y - a.y);
+    const climb = Math.max(0, a.y - b.y);
+    const maze = L.maze || 0;
+    const d = bird * 1.18 + climb * 0.55 + maze * 240;
+    const cruise = 82 / (1 + maze * 0.42);
+    const wind = L.wind ? 1.2 : 1;
+    const land = 3.2 + maze * 2.4;
+    return Math.round(clamp((d / Math.max(48, cruise)) * wind + land, 6, 26));
+  }
+  function hurryLimit() { return (fare && fare.hurry) || 12; }
+  function hurryLeft() {
+    if (!fare || !fare.carried) return 0;
+    return Math.max(0, hurryLimit() - Math.max(0, t - fareAt));
+  }
+  function burst(x, y, color, n) {
+    for (let i = 0; i < n; i++) {
+      const a = Math.random() * Math.PI * 2, s = 40 + Math.random() * 140;
+      parts.push({ x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s, life: 0.5, max: 0.5, r: 2 + Math.random() * 4, color });
+    }
+  }
+  function park(pad) {
+    taxi = { x: pad.x + pad.w / 2, y: pad.y - TH - 2, vx: 0, vy: 0, landed: true, face: 1, tilt: 0, rot: 0 };
+  }
+  function paintAlien() {
+    return { color: ALIEN[Math.floor(Math.random() * ALIEN.length)], ear: Math.random() > 0.5 };
+  }
+  function newFare(avoid, first) {
+    let from, dest;
+    if (first && level === 0) {
+      from = pads().find((p) => p.n === 2);
+      dest = pads().find((p) => p.n === 4);
+    } else {
+      const home = homePad().n;
+      const opts = pads().filter((p) => p.n !== avoid && p.n !== home);
+      const pool = opts.length ? opts : pads().filter((p) => p.n !== avoid);
+      from = pool[Math.floor(Math.random() * pool.length)];
+      const dests = pads().filter((p) => p.n !== from.n);
+      dest = dests[Math.floor(Math.random() * dests.length)];
+    }
+    fare = { from: from.n, dest: dest.n, wait: from.n, carried: false, alien: paintAlien(), hurry: hopHurry(from, dest) };
+    fareAt = t;
+  }
+  function loadLevel(i, firstHop, announce) {
+    level = i; faresDone = 0; fuel = lvl().tank;
+    park(homePad());
+    newFare(homePad().n, firstHop);
+    banner = ""; bannerT = 0;
+    if (announce) {
+      fuelGlow = 0.7;
+      dockSplash = lvl().name;
+      dockHook = lvl().hook || "";
+      dockSplashT = 2;
+      if (taxi) pop(taxi.x, taxi.y - 44, "tank up", "#7ee0b0", 1.2);
+    }
+  }
+  function fareMark() {
+    const need = (lvl() && lvl().fares) || 0;
+    return (faresDone || 0) + "/" + need;
+  }
+  function fuelPct() {
+    const tank = (lvl() && lvl().tank) || 100;
+    return clamp(Math.round(100 * fuel / Math.max(1, tank)), 0, 100);
+  }
+  function startRun() {
+    deaths = 0; lives = MAX_LIVES; overWhy = ""; dryCoast = false;
+    score = 0; combo = 1; flash = 0; shake = 0; newBest = false; spin = 0; fuelGlow = 0;
+    landTip = false; hintT = 0; clearT = 0; dockSplashT = 0; dockSplash = ""; dockHook = "";
+    loadLevel(0, true, false);
+    goPlay();
+  }
+  function retryNight() {
+    if (adsOn || inputOff || mode !== "over") return;
+    afterAd(() => startRun());
+  }
+  function wantPad() { return fare ? (fare.carried ? fare.dest : fare.wait) : 0; }
+  function padUnder() {
+    const bottom = taxi.y + TH, left = taxi.x - TW / 2;
+    for (const p of pads()) {
+      const ov = Math.min(left + TW, p.x + p.w) - Math.max(left, p.x);
+      if (ov < TW * 0.38) continue;
+      if (bottom >= p.y - 14 && bottom <= p.y + 20) return p;
+    }
+    return null;
+  }
+  function overPad() {
+    const left = taxi.x - TW / 2;
+    for (const p of pads()) {
+      const ov = Math.min(left + TW, p.x + p.w) - Math.max(left, p.x);
+      if (ov > TW * 0.35 && taxi.y + TH < p.y + 8 && taxi.y + TH > p.y - 90) return p;
+    }
+    return null;
+  }
+  function approachPad() {
+    if (!taxi) return null;
+    const left = taxi.x - TW / 2, bottom = taxi.y + TH;
+    for (const p of pads()) {
+      const ov = Math.min(left + TW, p.x + p.w) - Math.max(left, p.x);
+      if (ov > TW * 0.28 && bottom < p.y + 8 && bottom > p.y - 260) return p;
+    }
+    return null;
+  }
+  function tooHot() {
+    return taxi && taxi.vy > 18 && speedNow() > landMax();
+  }
+  function hitWall() {
+    const box = { x: taxi.x - TW / 2, y: taxi.y, w: TW, h: TH };
+    for (const w of walls()) {
+      if (box.x < w[0] + w[2] && box.x + box.w > w[0] && box.y < w[1] + w[3] && box.y + box.h > w[1]) return true;
+    }
+    return false;
+  }
+  function lineBlocked(x0, y0, x1, y1) {
+    for (let i = 1; i <= 18; i++) {
+      const x = x0 + (x1 - x0) * (i / 18), y = y0 + (y1 - y0) * (i / 18);
+      for (const w of walls()) {
+        if (x >= w[0] && x <= w[0] + w[2] && y >= w[1] && y <= w[1] + w[3]) return true;
+      }
+    }
+    return false;
+  }
+  function bumpScore(n) {
+    score += n;
+    if (score > best) { best = score; saveBest(best); newBest = true; }
+  }
+  function nextShift() {
+    poki.stop();
+    afterAd(() => {
+      if (level + 1 >= LEVELS.length) {
+        bumpScore(100);
+        clearT = 2.6;
+        mode = "clear";
+        chord([523, 659, 784, 1046], 0.14);
+        poki.happy(1);
+      } else {
+        loadLevel(level + 1, false, true);
+        tone(784, 0.12);
+        goPlay();
+      }
+    });
+  }
+  function finishClear() {
+    if (mode !== "clear" || adsOn) return;
+    loadLevel(0, true, true);
+    hintT = 0;
+    goPlay();
+  }
+  function sipFuel(frac, why) {
+    const tank = (lvl() && lvl().tank) || 100;
+    const need = tank * frac;
+    if (fuel >= need) return false;
+    fuel = need;
+    fuelGlow = 0.7;
+    dryCoast = false;
+    if (why) pop(taxi.x, taxi.y - 44, why, "#7ee0b0", 1.2);
+    return true;
+  }
+  function landOn(pad) {
+    const speed = Math.hypot(taxi.vx, taxi.vy);
+    taxi.x = clamp(taxi.x, pad.x + TW / 2, pad.x + pad.w - TW / 2);
+    taxi.y = pad.y - TH - 2; taxi.vx = 0; taxi.vy = 0; taxi.landed = true; taxi.rot = 0;
+    const perfect = speed < landMax() * 0.4;
+    thud();
+    if (perfect) chord([523, 659, 784], 0.1);
+    else tone(392, 0.09, "triangle", 0.045);
+    burst(taxi.x, pad.y, perfect ? "rgba(255,220,140,.9)" : "rgba(180,220,255,.7)", perfect ? 16 : 8);
+    const fumes = fuel <= 0.05;
+    if (perfect) { fuel = Math.min(lvl().tank, fuel + 2); fuelGlow = 0.55; pop(taxi.x, taxi.y - 36, "perfect", "#ffe08a"); }
+    if (fumes) sipFuel(0.12, "sip");
+    if (!fare) return;
+    if (!fare.carried && pad.n === fare.wait) {
+      fare.carried = true; fare.wait = 0; fareAt = t;
+      pop(taxi.x, taxi.y - 58, "Pad " + fare.dest, PAD_GO);
+      chord([392, 523], 0.12);
+    } else if (fare.carried && pad.n === fare.dest) {
+      const hurry = Math.max(0, Math.round(hurryLeft()));
+      const gain = 10 * combo + hurry + (perfect ? 8 : 0);
+      const streak = combo;
+      combo = Math.min(9, combo + 1); faresDone += 1; bumpScore(gain);
+      fare.carried = false;
+      pop(taxi.x, taxi.y - 58, "+$" + gain + (streak > 1 ? "  x" + streak : ""), "#9be7c4", 1.25);
+      chord([523, 659, 784], 0.11);
+      poki.happy(perfect ? 0.55 : 0.28);
+      if (faresDone >= lvl().fares) nextShift();
+      else newFare(pad.n, false);
+    } else {
+      const need = fare.carried ? fare.dest : fare.wait;
+      if (need && pad.n !== need) {
+        pop(taxi.x, taxi.y - 48, "Pad " + need, PAD_GO, 1.5);
+        say("Need Pad " + need, 1.6);
+        tone(220, 0.08, "triangle", 0.04);
+      }
+    }
+  }
+  function goPlay() {
+    mode = "play";
+    poki.start();
+  }
+  function respawn() {
+    combo = 1; spin = 0; dryCoast = false;
+    if (fare) { fare.carried = false; fare.wait = fare.from; }
+    park(homePad());
+    sipFuel(0.25);
+    goPlay();
+  }
+  function pauseForAd() {
+    adsOn = true;
+    inputOff = true;
+    muted = true;
+    thrustSound(false);
+    ptr.down = false;
+    keys.ArrowUp = keys.KeyW = keys.Space = keys.ArrowLeft = keys.ArrowRight = keys.KeyA = keys.KeyD = false;
+    try { if (actx && actx.state === "running") actx.suspend(); } catch (_) {}
+    try { canvas.blur(); } catch (_) {}
+    try { if (document.exitPointerLock) document.exitPointerLock(); } catch (_) {}
+  }
+  function endAd() {
+    adsOn = false;
+    muted = false;
+    inputOff = false;
+    try { if (actx && !userMuted && actx.state === "suspended") actx.resume(); } catch (_) {}
+  }
+  function afterAd(fn) {
+    if (adsOn) return;
+    poki.stop();
+    pauseForAd();
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      endAd();
+      fn();
+    };
+    Promise.resolve(poki.ad(() => { muted = true; thrustSound(false); }))
+      .then(finish)
+      .catch(finish);
+  }
+  function continueRun() {
+    const tank = (lvl() && lvl().tank) || 100;
+    dryCoast = false;
+    spin = 0;
+    if (overWhy === "dry tank") {
+      fuel = Math.max(fuel, tank * 0.4);
+      fuelGlow = 0.7;
+      pop(taxi.x, taxi.y - 44, "tank up", "#7ee0b0", 1.4);
+      say("Partial refill", 1.6);
+      chord([523, 659, 784], 0.12);
+      poki.happy(0.45);
+      goPlay();
+      return;
+    }
+    lives = 1;
+    if (fuel < tank * 0.3) fuel = tank * 0.4;
+    combo = 1;
+    if (fare) { fare.carried = false; fare.wait = fare.from; }
+    park(homePad());
+    pop(taxi.x, taxi.y - 58, "extra taxi", "#ffe08a", 1.4);
+    say("Extra taxi", 1.6);
+    chord([523, 659, 784], 0.12);
+    poki.happy(0.45);
+    goPlay();
+  }
+  function watchContinue() {
+    if (adsOn || inputOff || mode !== "over") return;
+    poki.stop();
+    pauseForAd();
+    let done = false;
+    const finish = (ok) => {
+      if (done) return;
+      done = true;
+      endAd();
+      if (ok) continueRun();
+    };
+    Promise.resolve(poki.reward(() => { muted = true; thrustSound(false); }))
+      .then((ok) => finish(ok))
+      .catch(() => finish(false));
+  }
+  function gameOver(why) {
+    if (mode === "over" || adsOn) return;
+    mode = "over"; poki.stop();
+    overWhy = why || "night's over";
+    banner = ""; bannerT = 0;
+    if (why === "dry tank") {
+      shake = 3; flash = 0; spin = 0;
+      if (taxi) taxi.rot = 0;
+      for (let i = 0; i < 10; i++) {
+        parts.push({
+          x: taxi.x + (Math.random() - 0.5) * 18, y: taxi.y + TH,
+          vx: (Math.random() - 0.5) * 18, vy: -18 - Math.random() * 22,
+          life: 0.7, max: 0.7, r: 3 + Math.random() * 4,
+          color: "rgba(170,178,190,.7)",
+        });
+      }
+      pop(taxi.x, taxi.y - 48, "empty", "#ff8a7a", 1.5);
+      tone(150, 0.16, "triangle", 0.035);
+      tone(88, 0.28, "sine", 0.03);
+    } else {
+      shake = 16; flash = 0.35; spin = 1;
+      burst(taxi.x, taxi.y + 8, "#ffb087", 28);
+      burst(taxi.x, taxi.y + 8, "#fff", 14);
+      tone(98, 0.28, "square");
+    }
+  }
+  function crash(why) {
+    if (mode !== "play" || adsOn) return;
+    lives = Math.max(0, lives - 1);
+    deaths += 1;
+    burst(taxi.x, taxi.y + 8, "#ffb087", 26);
+    burst(taxi.x, taxi.y + 8, "#fff", 12);
+    shake = 14; flash = 0.22; spin = 1;
+    pop(taxi.x, taxi.y - 64, why || OOPS[Math.floor(Math.random() * OOPS.length)], "#fff");
+    banner = ""; bannerT = 0; noiseHit(0.16); tone(98, 0.18, "square", 0.06);
+    if (lives <= 0) { gameOver("out of lives"); return; }
+    mode = "dead"; poki.stop();
+    pop(taxi.x, taxi.y - 44, lives + " left", "#ff8a7a");
+    const id = ++runId;
+    setTimeout(() => { if (id === runId) respawn(); }, 620);
+  }
+  function setPause(on) {
+    keys.ArrowUp = keys.KeyW = keys.Space = keys.ArrowLeft = keys.ArrowRight = keys.KeyA = keys.KeyD = false;
+    if (on) {
+      if (mode !== "play" || adsOn) return;
+      mode = "pause"; poki.stop(); thrustSound(false); ptr.down = false;
+    } else if (mode === "pause") {
+      if (adsOn) return;
+      afterAd(() => {
+        if (mode !== "pause") return;
+        goPlay();
+      });
+    }
+  }
+  function quitToTitle() {
+    if (adsOn) return;
+    thrustSound(false); ptr.down = false;
+    poki.stop();
+    park(homePad());
+    mode = "title";
+  }
+  function firstPlay() {
+    if (inputOff || adsOn) return;
+    if (mode === "title") startRun();
+  }
+  function begin() {
+    if (began) return;
+    began = true;
+    best = loadBest(); userMuted = false; runId = 0; deaths = 0; lives = MAX_LIVES; t = 0; score = 0; combo = 1; fuel = 100; fuelGlow = 0;
+    landTip = false; hintT = 0; clearT = 0; dockSplash = ""; dockHook = ""; dockSplashT = 0; dryCoast = false;
+    level = 0; faresDone = 0; spin = 0; overWhy = "";
+    park(homePad());
+    fare = { from: 2, dest: 4, wait: 2, carried: false, alien: paintAlien() };
+    mode = "title";
+    poki.pill();
+    poki.loaded();
+  }
+  poki.init().then(begin).catch(begin);
+  window.setTimeout(begin, 2000);
+
+  function canvasXY(ev) {
+    const s = screenXY(ev);
+    return {
+      x: s.x / view.worldScale + view.camX,
+      y: s.y / view.worldScale + view.camY,
+    };
+  }
+  function uiXY(ev) {
+    return screenXY(ev);
+  }
+  function fly() { return !inputOff && (keys.ArrowUp || keys.KeyW || keys.Space || ptr.down); }
+  function left() {
+    if (inputOff) return false;
+    if (keys.ArrowLeft || keys.KeyA) return true;
+    return ptr.down && ptr.x < ptr.originX - 22;
+  }
+  function right() {
+    if (inputOff) return false;
+    if (keys.ArrowRight || keys.KeyD) return true;
+    return ptr.down && ptr.x > ptr.originX + 22;
+  }
+  function hasGas() { return fuel > 0.05; }
+  function speedNow() { return taxi ? Math.hypot(taxi.vx, taxi.vy) : 0; }
+  function burn(dt, thrusting) {
+    if (!thrusting) return;
+    fuel = Math.max(0, fuel - (0.7 + 2.4 * (speedNow() / MAX_V)) * (lvl().burn || 1) * dt);
+  }
+
+  function tryDryLand() {
+    if (!taxi || taxi.landed) return false;
+    const pad = padUnder();
+    if (!pad || taxi.vy < -24 || speedNow() > landMax()) return false;
+    landOn(pad);
+    return true;
+  }
+  function update(dt) {
+    if (mode === "play" && !adsOn) t += dt;
+    if (bannerT > 0) bannerT -= dt;
+    if (hintT > 0) hintT -= dt;
+    if (dockSplashT > 0) dockSplashT -= dt;
+    if (mode === "clear") {
+      clearT -= dt;
+      if (clearT <= 0) finishClear();
+    }
+    if (flash > 0) flash -= dt;
+    if (fuelGlow > 0) fuelGlow = Math.max(0, fuelGlow - dt);
+    if (shake > 0) shake = Math.max(0, shake - dt * 28);
+    if (spin > 0) spin = Math.max(0, spin - dt * 3);
+    for (const p of parts) { p.life -= dt; p.x += p.vx * dt; p.y += p.vy * dt; p.vy += 40 * dt; }
+    parts.splice(0, parts.length, ...parts.filter((p) => p.life > 0));
+    for (const p of pops) { p.life -= dt; p.y -= 32 * dt; }
+    pops.splice(0, pops.length, ...pops.filter((p) => p.life > 0));
+    if (!taxi) return;
+    taxi.tilt = lerp(taxi.tilt, clamp(taxi.vx / 150, -0.28, 0.28), 1 - Math.pow(0.001, dt));
+    if (mode === "dead" || (mode === "over" && overWhy !== "dry tank")) { taxi.rot += 10 * dt; return; }
+    if (mode === "over") return;
+    if (view.portrait) { thrustSound(false); return; }
+    if (adsOn || mode !== "play") return;
+
+    if (hasGas()) dryCoast = false;
+    else if (!fly()) dryCoast = false;
+    else if (!dryCoast) {
+      if (tryDryLand()) return;
+      gameOver("dry tank");
+      return;
+    }
+
+    if (taxi.landed) {
+      if (fly() && hasGas()) {
+        if (!landTip) { landTip = true; say("Ease off over the pad", 2.8); }
+        taxi.landed = false; taxi.vy = -TAKEOFF; burn(0.18, true);
+        if (!hasGas() && fly()) dryCoast = true;
+      } else return;
+    }
+
+    taxi.vy += GRAV * dt;
+    if (lvl().wind) taxi.vx += lvl().wind * dt;
+
+    const mag = lvl().magnet || 0;
+    const hover = overPad();
+    if (mag && hover && taxi.vy > 0) {
+      taxi.vy *= (1 - mag * 2.2 * dt * 60 / 60);
+      taxi.vx *= (1 - mag * 2.6 * dt);
+      const cx = hover.x + hover.w / 2;
+      taxi.vx += (cx - taxi.x) * mag * 8 * dt;
+    }
+
+    const thrusting = hasGas() && (fly() || left() || right());
+    if (fly() && hasGas()) {
+      taxi.vy -= THRUST * dt;
+      parts.push({
+        x: taxi.x + (Math.random() - 0.5) * 12, y: taxi.y + TH + 2,
+        vx: (Math.random() - 0.5) * 16, vy: 55 + Math.random() * 40,
+        life: 0.22, max: 0.22, r: 3 + Math.random() * 3,
+        color: Math.random() > 0.45 ? "#7ecbff" : "#fff4c8",
+      });
+    }
+    if (left()) {
+      taxi.vx -= SIDE * dt; taxi.face = -1;
+      if (hasGas()) {
+        parts.push({
+          x: taxi.x + 22, y: taxi.y + TH * 0.55,
+          vx: 70 + Math.random() * 30, vy: (Math.random() - 0.5) * 28,
+          life: 0.18, max: 0.18, r: 2 + Math.random() * 2.4,
+          color: Math.random() > 0.45 ? "#7ecbff" : "#fff4c8",
+        });
+      }
+    }
+    if (right()) {
+      taxi.vx += SIDE * dt; taxi.face = 1;
+      if (hasGas()) {
+        parts.push({
+          x: taxi.x - 22, y: taxi.y + TH * 0.55,
+          vx: -70 - Math.random() * 30, vy: (Math.random() - 0.5) * 28,
+          life: 0.18, max: 0.18, r: 2 + Math.random() * 2.4,
+          color: Math.random() > 0.45 ? "#7ecbff" : "#fff4c8",
+        });
+      }
+    }
+    burn(dt, thrusting);
+    if (!hasGas() && fly()) {
+      if (!dryCoast) say("Coast — no fuel", 1.8);
+      dryCoast = true;
+    }
+    if (!hasGas() && Math.random() < dt * 6) {
+      parts.push({
+        x: taxi.x + (Math.random() - 0.5) * 10, y: taxi.y + TH,
+        vx: (Math.random() - 0.5) * 12, vy: -12 - Math.random() * 16,
+        life: 0.45, max: 0.45, r: 2 + Math.random() * 3,
+        color: "rgba(170,178,190,.55)",
+      });
+    }
+
+    taxi.vx *= Math.max(0, 1 - DRAG_X * dt);
+    taxi.vy *= Math.max(0, 1 - DRAG_Y * dt);
+    const sp = speedNow();
+    if (sp > MAX_V) { taxi.vx *= MAX_V / sp; taxi.vy *= MAX_V / sp; }
+    taxi.x += taxi.vx * dt; taxi.y += taxi.vy * dt;
+
+    if (taxi.x < 20 || taxi.x > W - 20 || taxi.y < -10 || taxi.y > H + 20) { crash("lost in space"); return; }
+
+    const pad = padUnder();
+    if (pad && taxi.vy >= -24) {
+      if (taxi.y + TH >= pad.y - 10) {
+        if (speedNow() <= landMax()) landOn(pad);
+        else crash("too fast");
+        return;
+      }
+    }
+    if (!taxi.landed && !pad && hitWall()) crash(OOPS[Math.floor(Math.random() * OOPS.length)]);
+  }
+
+  function roundRect(x, y, w, h, r) {
+    const rr = Math.min(r, w / 2, h / 2);
+    ctx.beginPath();
+    ctx.moveTo(x + rr, y);
+    ctx.arcTo(x + w, y, x + w, y + h, rr);
+    ctx.arcTo(x + w, y + h, x, y + h, rr);
+    ctx.arcTo(x, y + h, x, y, rr);
+    ctx.arcTo(x, y, x + w, y, rr);
+    ctx.closePath();
+  }
+  function glass(x, y, w, h, r) {
+    ctx.fillStyle = "rgba(12,14,22,.62)"; roundRect(x, y, w, h, r); ctx.fill();
+    ctx.strokeStyle = "rgba(255,255,255,.08)"; ctx.lineWidth = 1; roundRect(x, y, w, h, r); ctx.stroke();
+  }
+  function drawLife(x, y, on, s) {
+    s = s || 1;
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.scale(s, s);
+    ctx.globalAlpha = on ? 1 : 0.28;
+    ctx.fillStyle = on ? "#ffd56a" : "#8b93a6";
+    roundRect(-17, -3, 34, 15, 4); ctx.fill();
+    ctx.fillStyle = on ? "#1b2436" : "#4a5162";
+    roundRect(-12, 0, 10, 8, 2); ctx.fill();
+    roundRect(3, 0, 10, 8, 2); ctx.fill();
+    ctx.fillStyle = "#fff";
+    ctx.beginPath(); ctx.arc(-8, 4, 2.2, 0, Math.PI * 2); ctx.arc(7, 4, 2.2, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = on ? "#ffe08a" : "#6d7588";
+    roundRect(-7, -12, 14, 10, 2); ctx.fill();
+    ctx.fillStyle = "#1b2436";
+    ctx.font = "700 7px Outfit, sans-serif"; ctx.textAlign = "center";
+    ctx.fillText("TAXI", 0, -4);
+    ctx.fillStyle = on ? "#1b2436" : "#4a5162";
+    ctx.beginPath(); ctx.arc(-10, 12, 3.2, 0, Math.PI * 2); ctx.arc(10, 12, 3.2, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
+  }
+  function padFill(p, want, hoverPad, hotLand) {
+    const hot = p.n === want;
+    const danger = hotLand && hoverPad && p.n === hoverPad.n;
+    if (danger) return { fill: PAD_DANGER, glow: PAD_DANGER, ink: "#2a1c08", glowAmt: 28 };
+    if (hot) return { fill: PAD_GO, glow: PAD_GO, ink: "#062026", glowAmt: 32 };
+    return { fill: PAD_IDLE, glow: "#8ec4ff", ink: "rgba(220,230,245,.85)", glowAmt: 8 };
+  }
+  function drawPad(p, want, hoverPad, hotLand) {
+    const c = padFill(p, want, hoverPad, hotLand);
+    ctx.shadowColor = c.glow; ctx.shadowBlur = c.glowAmt;
+    ctx.fillStyle = c.fill;
+    roundRect(p.x, p.y - 7, p.w, 14, 6); ctx.fill();
+    ctx.shadowBlur = 0;
+    ctx.fillStyle = c.ink;
+    ctx.font = "700 17px Outfit, sans-serif"; ctx.textAlign = "center";
+    ctx.fillText(String(p.n), p.x + p.w / 2, p.y - 16);
+  }
+  function fuelColor(pct) {
+    if (pct < 22) return "#ff8a7a";
+    if (pct < 40) return "#ffd27a";
+    return "#7ee0b0";
+  }
+  function drawChip(b, lit) {
+    glass(b.x, b.y, b.w, b.h, 14);
+    if (lit) {
+      ctx.globalAlpha = 0.18; ctx.fillStyle = "#ffd56a";
+      roundRect(b.x, b.y, b.w, b.h, 14); ctx.fill(); ctx.globalAlpha = 1;
+    }
+  }
+  function drawFuelHud(x, y, w, h, pct) {
+    const low = pct < 22, col = fuelGlow > 0 ? "#7ee0b0" : fuelColor(pct);
+    glass(x, y, w, h, 14);
+    if ((low || fuelGlow > 0) && mode === "play") {
+      ctx.globalAlpha = low ? 0.14 + Math.sin(t * 9) * 0.1 : fuelGlow * 0.22;
+      ctx.fillStyle = col;
+      roundRect(x, y, w, h, 14); ctx.fill();
+      ctx.globalAlpha = 1;
+    }
+    ctx.fillStyle = col; ctx.font = "700 22px Outfit, sans-serif"; ctx.textAlign = "left";
+    ctx.fillText(pct + "%", x + 14, y + 26);
+    if (low && mode === "play") {
+      ctx.globalAlpha = 0.75 + Math.sin(t * 9) * 0.25;
+      ctx.font = "700 12px Outfit, sans-serif";
+      ctx.fillText("LOW", x + 88, y + 24);
+      ctx.globalAlpha = 1;
+    }
+    const bx = x + 14, by = y + 34, bw = w - 36, bh = 10;
+    ctx.fillStyle = "rgba(255,255,255,.08)"; roundRect(bx, by, bw, bh, 5); ctx.fill();
+    const fillW = pct > 0 ? Math.max(6, bw * (pct / 100)) : 0;
+    if (fillW) { ctx.fillStyle = col; roundRect(bx, by, fillW, bh, 5); ctx.fill(); }
+    ctx.fillStyle = col;
+    roundRect(bx + bw, by + 2, 6, 6, 2); ctx.fill();
+  }
+  function drawMuteBtn() {
+    const on = !userMuted;
+    const box = muteBox();
+    drawChip(box, on);
+    ctx.save();
+    ctx.translate(box.x + 22, box.y + 24);
+    ctx.fillStyle = on ? "#ffd56a" : "#8b93a6";
+    roundRect(-13, -7, 10, 14, 3); ctx.fill();
+    ctx.beginPath();
+    ctx.moveTo(-4, -7); ctx.lineTo(9, -15); ctx.lineTo(9, 15); ctx.lineTo(-4, 7);
+    ctx.closePath(); ctx.fill();
+    if (on) {
+      ctx.strokeStyle = "#ffd56a"; ctx.lineCap = "round"; ctx.lineWidth = 2.4;
+      ctx.beginPath(); ctx.arc(11, 0, 7, -0.7, 0.7); ctx.stroke();
+      ctx.beginPath(); ctx.arc(11, 0, 12, -0.7, 0.7); ctx.stroke();
+    }
+    ctx.restore();
+  }
+  function drawPauseBtn() {
+    const box = pauseBox();
+    drawChip(box, true);
+    ctx.fillStyle = "#ffd56a";
+    roundRect(box.x + 16, box.y + 14, 5, 20, 2); ctx.fill();
+    roundRect(box.x + 27, box.y + 14, 5, 20, 2); ctx.fill();
+  }
+  function drawAlien(cx, cy, a, s) {
+    s = s || 1;
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.scale(s, s);
+    if (a.ear) {
+      ctx.strokeStyle = a.color; ctx.lineWidth = 2.2;
+      ctx.beginPath(); ctx.moveTo(0, -10); ctx.lineTo(0, -17); ctx.stroke();
+      ctx.fillStyle = "#ffe08a"; ctx.beginPath(); ctx.arc(0, -18, 2.6, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.fillStyle = a.color;
+    ctx.beginPath(); ctx.ellipse(0, 0, 10, 12, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = "#fff";
+    ctx.beginPath(); ctx.arc(-3.6, -2.2, 3, 0, Math.PI * 2); ctx.arc(3.6, -2.2, 3, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = "#1b2436";
+    ctx.beginPath(); ctx.arc(-3, -1.7, 1.35, 0, Math.PI * 2); ctx.arc(4.1, -1.7, 1.35, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
+  }
+
+  function draw() {
+    thrustSound(mode === "play" && taxi && !taxi.landed && fly() && hasGas());
+    refreshCam();
+    const L = LEVELS[Math.min(level || 0, LEVELS.length - 1)];
+    const sx = shake ? (Math.random() - 0.5) * shake : 0;
+    const sy = shake ? (Math.random() - 0.5) * shake : 0;
+    const skyC = L.sky || ["#141a2c", "#08090f"], wallC = L.wall || ["#2a3348", "#151922"];
+    ctx.setTransform(view.dpr, 0, 0, view.dpr, 0, 0);
+    const skyFull = ctx.createLinearGradient(0, 0, 0, view.vh);
+    skyFull.addColorStop(0, skyC[0]); skyFull.addColorStop(1, skyC[1]);
+    ctx.fillStyle = skyFull;
+    ctx.fillRect(0, 0, view.vw, view.vh);
+    applyWorld();
+    const sky = ctx.createLinearGradient(0, 0, 0, H);
+    sky.addColorStop(0, skyC[0]); sky.addColorStop(1, skyC[1]);
+    ctx.fillStyle = sky; ctx.fillRect(0, 0, W, H);
+    ctx.save(); ctx.translate(sx, sy);
+
+    for (const s of stars) {
+      ctx.fillStyle = `rgba(230,236,255,${0.32 + Math.sin(t * 1.5 + s.tw) * 0.18})`;
+      ctx.beginPath(); ctx.arc(s.x, s.y, s.s, 0, Math.PI * 2); ctx.fill();
+    }
+    if (L.wind) {
+      const dir = Math.sign(L.wind) || 1;
+      ctx.strokeStyle = "rgba(210,236,255,.48)"; ctx.lineWidth = 2.6; ctx.lineCap = "round";
+      for (let i = 0; i < 28; i++) {
+        const y = 56 + ((i * 89 + t * 36) % 600);
+        const x = ((i * 157 + t * L.wind * 18) % (W + 90)) - 45;
+        ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x + dir * 42, y - 5); ctx.stroke();
+      }
+      ctx.fillStyle = "rgba(210,236,255,.55)";
+      ctx.beginPath();
+      const fx = dir > 0 ? W - 88 : 88, fy = 118;
+      ctx.moveTo(fx, fy); ctx.lineTo(fx - dir * 22, fy - 10); ctx.lineTo(fx - dir * 22, fy + 10); ctx.fill();
+    }
+    for (const w of L.walls) {
+      const g = ctx.createLinearGradient(w[0], w[1], w[0], w[1] + w[3]);
+      g.addColorStop(0, wallC[0]); g.addColorStop(1, wallC[1]);
+      ctx.fillStyle = g; roundRect(w[0], w[1], w[2], w[3], 10); ctx.fill();
+      ctx.fillStyle = "rgba(180,200,230,.12)"; ctx.fillRect(w[0], w[1], w[2], 2);
+    }
+
+    const want = wantPad();
+    const hoverPad = (mode === "play" && taxi) ? approachPad() : null;
+    const hotLand = !!(hoverPad && tooHot());
+    for (const p of L.pads) drawPad(p, want, hoverPad, hotLand);
+
+    if (fare && !fare.carried) {
+      const pad = L.pads.find((p) => p.n === fare.wait);
+      if (pad) {
+        const bob = Math.sin(t * 3.4) * 3;
+        drawAlien(pad.x + pad.w * 0.32, pad.y - 26 + bob, fare.alien, 1.05);
+      }
+    }
+
+    if (taxi && want && mode === "play") {
+      const p = L.pads.find((q) => q.n === want);
+      if (p) {
+        const ax = p.x + p.w / 2, ay = p.y - 52;
+        const ang = Math.atan2(ay - taxi.y, ax - taxi.x);
+        const blocked = lineBlocked(taxi.x, taxi.y, ax, ay);
+        if (!blocked) {
+          ctx.strokeStyle = "rgba(106,240,255,.4)"; ctx.lineWidth = 2; ctx.setLineDash([6, 8]);
+          ctx.beginPath(); ctx.moveTo(taxi.x, taxi.y); ctx.lineTo(ax, ay); ctx.stroke(); ctx.setLineDash([]);
+        } else {
+          ctx.save(); ctx.translate(taxi.x, taxi.y - 30); ctx.rotate(ang);
+          ctx.fillStyle = PAD_GO;
+          ctx.beginPath(); ctx.moveTo(14, 0); ctx.lineTo(2, -7); ctx.lineTo(2, 7); ctx.closePath(); ctx.fill();
+          ctx.restore();
+        }
+        ctx.fillStyle = PAD_GO;
+        ctx.save(); ctx.translate(ax, ay); ctx.rotate(ang + Math.PI / 2);
+        ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(11, 20); ctx.lineTo(-11, 20); ctx.closePath(); ctx.fill();
+        ctx.restore();
+      }
+    }
+
+    for (const p of parts) {
+      ctx.globalAlpha = Math.max(0, p.life / p.max);
+      ctx.fillStyle = p.color; ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+    ctx.restore();
+
+    const pct = fuelPct();
+
+    ctx.save(); ctx.translate(sx, sy);
+    for (const p of L.pads) {
+      if (p.y > 250) continue;
+      drawPad(p, want, hoverPad, hotLand);
+    }
+    if (taxi) {
+      const riding = fare && fare.carried;
+      const dead = !hasGas() && (mode === "play" || (mode === "over" && overWhy === "dry tank"));
+      ctx.save();
+      ctx.translate(taxi.x, taxi.y + TH / 2);
+      ctx.rotate(taxi.tilt + (taxi.rot || 0));
+      ctx.scale(taxi.face, 1);
+      ctx.translate(-TW / 2, -TH / 2);
+      ctx.fillStyle = "rgba(0,0,0,.2)";
+      ctx.beginPath(); ctx.ellipse(TW / 2, TH + 10, 16, 4, 0, 0, Math.PI * 2); ctx.fill();
+      if (riding) {
+        ctx.shadowColor = fare.alien.color;
+        ctx.shadowBlur = 18;
+        ctx.strokeStyle = fare.alien.color;
+        ctx.lineWidth = 3;
+        roundRect(-3, 1, TW + 6, TH + 1, 9); ctx.stroke();
+        ctx.shadowBlur = 0;
+      }
+      const body = ctx.createLinearGradient(0, 0, 0, TH);
+      body.addColorStop(0, dead ? "#9aa3b0" : riding ? "#fff4c4" : "#fff7dc");
+      body.addColorStop(1, dead ? "#6d7380" : riding ? "#f0c14a" : "#e4c45c");
+      ctx.fillStyle = body; roundRect(0, 2, TW, TH - 2, 8); ctx.fill();
+      const panic = !dead && hoverPad && tooHot();
+      ctx.fillStyle = "#1b2436";
+      roundRect(6, 5, 16, 11, 3); ctx.fill();
+      ctx.fillStyle = dead ? "#6a7384" : "#fff";
+      ctx.beginPath(); ctx.arc(12, 10, panic ? 3.2 : 2.4, 0, Math.PI * 2); ctx.arc(18, 10, panic ? 3.2 : 2.4, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = "#1b2436";
+      ctx.beginPath(); ctx.arc(12.5, dead ? 11.2 : 10.4, 1.2, 0, Math.PI * 2); ctx.arc(18.5, dead ? 11.2 : 10.4, 1.2, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = "#121826";
+      roundRect(26, 5, 22, 12, 4); ctx.fill();
+      ctx.fillStyle = dead ? "#7a8290" : riding ? fare.alien.color : "#ffcc4d";
+      roundRect(16, -8, 20, 11, 3); ctx.fill();
+      ctx.fillStyle = "#1b2436"; ctx.font = "700 8px Outfit, sans-serif"; ctx.textAlign = "center";
+      ctx.fillText(dead ? "OUT" : riding ? "IN" : "TAXI", 26, 1);
+      if (riding) {
+        const bob = Math.sin(t * 9) * 1.6;
+        drawAlien(38, -2 + bob, fare.alien, 0.78);
+      }
+      ctx.restore();
+      if (mode === "play" && fare && fare.carried) {
+        const lim = hurryLimit();
+        const hurry = lim > 0 ? Math.max(0, hurryLeft() / lim) : 0;
+        if (hurry > 0) {
+          ctx.strokeStyle = hurry < 0.34 ? "#ff8a7a" : "#7ee0b0";
+          ctx.lineWidth = 2.6; ctx.lineCap = "round";
+          ctx.beginPath();
+          ctx.arc(taxi.x, taxi.y + TH / 2, 34, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * hurry);
+          ctx.stroke();
+        }
+      }
+      if (mode === "play" && hoverPad && tooHot()) {
+        ctx.globalAlpha = 0.92 + Math.sin(t * 14) * 0.08;
+        ctx.fillStyle = "#ff8a7a"; ctx.font = "700 22px Outfit, sans-serif"; ctx.textAlign = "center";
+        ctx.fillText("TOO FAST", taxi.x, taxi.y - 28);
+        ctx.globalAlpha = 1;
+      }
+    }
+
+    for (const p of pops) {
+      ctx.globalAlpha = Math.max(0, p.life);
+      ctx.fillStyle = p.color; ctx.font = "700 16px Outfit, sans-serif"; ctx.textAlign = "center";
+      ctx.fillText(p.text, p.x, p.y);
+    }
+    ctx.globalAlpha = 1; ctx.restore();
+
+    applyUi();
+    drawScreenUi(L, pct, want);
+  }
+
+  function drawScreenUi(L, pct, want) {
+    const vw = view.vw, vh = view.vh, cx = vw / 2;
+    if (pct < 22 && mode === "play") {
+      ctx.fillStyle = `rgba(255,90,70,${0.06 + Math.sin(t * 8) * 0.04})`;
+      ctx.fillRect(0, 0, vw, vh);
+    }
+    if (mode === "play" || mode === "dead" || mode === "pause") {
+      const hy = 12, hh = 52;
+      glass(12, hy, 268, hh, 14);
+      ctx.fillStyle = "#fff6d6"; ctx.font = "700 12px Outfit, sans-serif"; ctx.textAlign = "left";
+      ctx.fillText(L.name, 24, hy + 17);
+      ctx.fillStyle = "rgba(230,236,255,.55)";
+      ctx.fillText(fareMark(), 24 + ctx.measureText(L.name).width + 10, hy + 17);
+      ctx.fillStyle = "#f7f8fc"; ctx.font = "700 20px Outfit, sans-serif";
+      ctx.fillText("$" + score, 24, hy + 40);
+      if (combo > 1) {
+        const sw = ctx.measureText("$" + score).width;
+        ctx.fillStyle = "#7ee0b0"; ctx.font = "700 13px Outfit, sans-serif";
+        ctx.fillText("x" + combo, 24 + sw + 10, hy + 40);
+      }
+      for (let i = 0; i < MAX_LIVES; i++) drawLife(178 + i * 32, hy + 28, i < lives, 0.78);
+      const fb = fuelBox();
+      if (want) {
+        const riding = fare && fare.carried;
+        const hurry = riding ? Math.max(0, Math.ceil(hurryLeft())) : 0;
+        const jw = 216, jx = Math.max(292, Math.min(cx - jw / 2, fb.x - 16 - jw));
+        if (jx + jw < fb.x - 8) {
+          glass(jx, hy, jw, hh, 14);
+          ctx.fillStyle = "rgba(230,236,255,.6)"; ctx.font = "600 12px Outfit, sans-serif"; ctx.textAlign = "center";
+          ctx.fillText(riding ? "drop off" : "pick up", jx + jw / 2 + (riding ? 12 : 0), hy + 18);
+          ctx.fillStyle = PAD_GO; ctx.font = "700 22px Outfit, sans-serif";
+          ctx.fillText("Pad " + want, jx + jw / 2 + (riding ? 12 : 0), hy + 42);
+          if (riding && hurry > 0) {
+            ctx.fillStyle = hurry < 4 ? "#ff8a7a" : "#7ee0b0";
+            ctx.font = "700 12px Outfit, sans-serif";
+            ctx.fillText(hurry + "s hurry", jx + jw / 2 + 78, hy + 18);
+          }
+          if (fare && fare.alien) drawAlien(jx + 26, hy + 26, fare.alien, 0.7);
+        }
+      }
+      drawFuelHud(fb.x, fb.y, fb.w, fb.h, pct);
+    }
+    if (mode === "play" && dockSplashT > 0) {
+      ctx.globalAlpha = Math.min(1, dockSplashT);
+      ctx.fillStyle = "#fff6d6"; ctx.font = "700 32px Outfit, sans-serif"; ctx.textAlign = "center";
+      ctx.fillText(dockSplash, cx, vh * 0.2);
+      if (dockHook) {
+        ctx.fillStyle = "rgba(230,236,255,.75)"; ctx.font = "600 16px Outfit, sans-serif";
+        ctx.fillText(dockHook, cx, vh * 0.2 + 28);
+      }
+      ctx.globalAlpha = 1;
+    }
+    if (bannerT > 0) {
+      ctx.globalAlpha = Math.min(1, bannerT);
+      ctx.fillStyle = "#ffd27a"; ctx.font = "700 18px Outfit, sans-serif"; ctx.textAlign = "center";
+      ctx.fillText(banner, cx, vh - 80);
+      ctx.globalAlpha = 1;
+    }
+    if (mode === "title") {
+      ctx.fillStyle = "rgba(8,9,15,.55)"; ctx.fillRect(0, 0, vw, vh);
+      ctx.textAlign = "center";
+      ctx.fillStyle = "#fff6d6"; ctx.font = "700 44px Outfit, sans-serif";
+      ctx.fillText("Space Taxi", cx, vh * 0.22);
+      ctx.fillStyle = "rgba(230,236,255,.85)"; ctx.font = "600 16px Outfit, sans-serif";
+      ctx.fillText("Hold to fly. Land soft on the glowing pad.", cx, vh * 0.28);
+      ctx.fillStyle = "rgba(230,236,255,.55)"; ctx.font = "600 14px Outfit, sans-serif";
+      ctx.fillText("3 taxis. Too fast costs one.", cx, vh * 0.33);
+      ctx.fillText("Hold  ·  slide to steer  ·  let go to coast", cx, vh * 0.38);
+      ctx.fillStyle = "rgba(230,236,255,.5)";
+      ctx.fillText("best  $" + (best || 0) + "  ·  saved", cx, vh * 0.45);
+      ctx.fillStyle = "#ffe08a"; ctx.font = "700 18px Outfit, sans-serif";
+      ctx.fillText("Tap to start", cx, vh * 0.72);
+    }
+    if (mode === "over") {
+      ctx.fillStyle = "rgba(8,9,15,.66)"; ctx.fillRect(0, 0, vw, vh);
+      ctx.textAlign = "center";
+      ctx.fillStyle = "#fff6d6"; ctx.font = "700 40px Outfit, sans-serif";
+      ctx.fillText("Night over", cx, vh * 0.22);
+      ctx.fillStyle = "#ff8a7a"; ctx.font = "600 18px Outfit, sans-serif";
+      ctx.fillText(overWhy === "dry tank" ? "Empty tank" : "No lives left", cx, vh * 0.28);
+      ctx.fillStyle = "#fff"; ctx.font = "700 32px Outfit, sans-serif";
+      ctx.fillText("$" + score, cx, vh * 0.36);
+      const retry = menuRetry(), watch = menuWatch();
+      glass(retry.x, retry.y, retry.w, retry.h, 16);
+      ctx.fillStyle = "#ffe08a"; ctx.font = "700 18px Outfit, sans-serif";
+      ctx.fillText("Restart  ·  Dock 1", cx, retry.y + 36);
+      glass(watch.x, watch.y, watch.w, watch.h, 16);
+      ctx.fillStyle = "#c5d4f0"; ctx.font = "700 16px Outfit, sans-serif";
+      ctx.fillText(overWhy === "dry tank" ? "Watch ad  ·  refill tank" : "Watch ad  ·  1 taxi", cx, watch.y + 36);
+    }
+    if (mode === "pause") {
+      ctx.fillStyle = "rgba(8,9,15,.62)"; ctx.fillRect(0, 0, vw, vh);
+      ctx.textAlign = "center";
+      ctx.fillStyle = "#fff6d6"; ctx.font = "700 40px Outfit, sans-serif";
+      ctx.fillText("Paused", cx, vh * 0.32);
+      const resume = menuResume(), quit = menuQuit();
+      glass(resume.x, resume.y, resume.w, resume.h, 16);
+      ctx.fillStyle = "#ffe08a"; ctx.font = "700 18px Outfit, sans-serif";
+      ctx.fillText("Tap to resume", cx, resume.y + 36);
+      glass(quit.x, quit.y, quit.w, quit.h, 16);
+      ctx.fillStyle = "rgba(230,236,255,.8)"; ctx.font = "600 16px Outfit, sans-serif";
+      ctx.fillText("Quit to menu", cx, quit.y + 32);
+    }
+    if (mode === "clear") {
+      ctx.fillStyle = "rgba(8,9,15,.62)"; ctx.fillRect(0, 0, vw, vh);
+      ctx.textAlign = "center";
+      ctx.fillStyle = "#fff6d6"; ctx.font = "700 40px Outfit, sans-serif";
+      ctx.fillText("Night clear", cx, vh * 0.28);
+      ctx.fillStyle = "#7ee0b0"; ctx.font = "700 24px Outfit, sans-serif";
+      ctx.fillText("+$100", cx, vh * 0.36);
+      ctx.fillStyle = "#ffe08a"; ctx.font = "700 18px Outfit, sans-serif";
+      ctx.fillText("Tap to keep flying", cx, vh * 0.7);
+    }
+    if (mode !== "boot") drawMuteBtn();
+    if (mode === "play") drawPauseBtn();
+    if (flash > 0) { ctx.fillStyle = `rgba(255,90,70,${flash * 0.45})`; ctx.fillRect(0, 0, vw, vh); }
+  }
+
+  function onPtr(ev, down) {
+    const p = canvasXY(ev);
+    const u = uiXY(ev);
+    ptr.x = p.x; ptr.y = p.y;
+    if (adsOn || inputOff) {
+      if (down === false) ptr.down = false;
+      return;
+    }
+    if (down === true) {
+      if (mode !== "boot" && inBox(u, muteBox())) { toggleMute(); return; }
+      if (mode === "play" && inBox(u, pauseBox())) {
+        pausePress.on = true; pausePress.t = performance.now(); pausePress.x = u.x; pausePress.y = u.y;
+        if (taxi && !taxi.landed) { ptr.down = true; ptr.originX = p.x; }
+        return;
+      }
+      if (mode === "pause") {
+        if (inBox(u, menuResume())) setPause(false);
+        else if (inBox(u, menuQuit())) quitToTitle();
+        return;
+      }
+      if (mode === "clear") { finishClear(); return; }
+      if (mode === "over") {
+        if (inBox(u, menuRetry())) retryNight();
+        else if (inBox(u, menuWatch())) watchContinue();
+        return;
+      }
+      ptr.down = true; ptr.originX = p.x;
+      if (mode === "title") firstPlay();
+    }
+    if (down === false) {
+      if (pausePress.on) {
+        const held = performance.now() - pausePress.t;
+        const dist = Math.hypot(u.x - pausePress.x, u.y - pausePress.y);
+        if (mode === "play" && held < 320 && dist < 18 && inBox(u, pauseBox())) setPause(true);
+        pausePress.on = false;
+      }
+      ptr.down = false;
+    }
+  }
+  canvas.addEventListener("pointerdown", (e) => {
+    if (adsOn) return;
+    e.preventDefault();
+    canvas.focus();
+    canvas.setPointerCapture(e.pointerId);
+    onPtr(e, true);
+  });
+  canvas.addEventListener("pointermove", (e) => onPtr(e, null));
+  canvas.addEventListener("pointerup", (e) => onPtr(e, false));
+  canvas.addEventListener("pointercancel", (e) => onPtr(e, false));
+
+  window.addEventListener("keydown", (e) => {
+    if (adsOn) return;
+    if (["ArrowDown", "ArrowUp", "ArrowLeft", "ArrowRight", "Space"].includes(e.code) || e.key === " " || e.key === "ArrowDown" || e.key === "ArrowUp") e.preventDefault();
+    if (inputOff) return;
+    keys[e.code] = true;
+    if (e.code === "KeyM") { toggleMute(); return; }
+    if (e.code === "Escape") {
+      if (mode === "play") setPause(true);
+      else if (mode === "pause") setPause(false);
+      return;
+    }
+    if (mode === "pause" && (e.code === "Enter" || e.code === "Space")) { setPause(false); return; }
+    if (mode === "clear") { finishClear(); return; }
+    if (mode === "title") firstPlay();
+    if (mode === "over" && (e.code === "Enter" || e.code === "Space")) retryNight();
+  });
+  window.addEventListener("keyup", (e) => { keys[e.code] = false; });
+  window.addEventListener("blur", () => {
+    ptr.down = false;
+    pausePress.on = false;
+    Object.keys(keys).forEach((k) => { keys[k] = false; });
+  });
+  window.addEventListener("wheel", (e) => e.preventDefault(), { passive: false });
+  window.addEventListener("touchmove", (e) => e.preventDefault(), { passive: false });
+
+  let last = performance.now();
+  function loop(now) {
+    const dt = Math.min(0.033, (now - last) / 1000);
+    last = now; update(dt); draw(); requestAnimationFrame(loop);
+  }
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
